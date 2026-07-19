@@ -1,0 +1,8 @@
+- [x] `repack_recovery.py` 脚本存在并能正确解析 `recovery.img` 的 `ANDROID!` header
+- [x] ramdisk 压缩格式被正确识别并解压为 cpio 文件树
+- [x] ramdisk 文件树中 `prop.default` 被仓库 `/workspace/prop.default` 内容覆盖（或新建）
+- [x] 重新打包的 ramdisk 使用与原 ramdisk 相同的压缩格式
+- [x] 重新打包的 boot image header 字段（magic、page_size、cmdline、各 size 字段）正确
+- [x] 新 `/workspace/recovery.img` 可被 `file` 命令识别为 Android bootimg
+- [x] 二次解包新 img 后，ramdisk 内 `prop.default` 内容与仓库 `prop.default` 完全一致
+- [x] 仓库其它文件（README.md、prop.default、.github/）未被修改
