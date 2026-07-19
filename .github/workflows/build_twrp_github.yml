@@ -161,6 +161,21 @@ jobs:
           if [ -f "$DT_DIR/vendorsetup.sh" ]; then
             sed -i 's|omni_|twrp_|g' "$DT_DIR/vendorsetup.sh"
           fi
+          # 5. Bump BOARD_RECOVERYIMAGE_PARTITION_SIZE so TWRP image fits.
+          #    TWRP recovery image (~80MB) is larger than the stock recovery (~64MB),
+          #    so the size check `recovery.img too large (X > Y)` fails. Default the
+          #    limit to 256MB if it's smaller than that.
+          if [ -f "$DT_DIR/BoardConfig.mk" ]; then
+            echo "=== BoardConfig.mk BEFORE partition size bump ==="
+            grep -E "BOARD_RECOVERYIMAGE_PARTITION_SIZE|BOARD_*PARTITION_SIZE" "$DT_DIR/BoardConfig.mk" || true
+            if grep -q "BOARD_RECOVERYIMAGE_PARTITION_SIZE" "$DT_DIR/BoardConfig.mk"; then
+              sed -i 's|BOARD_RECOVERYIMAGE_PARTITION_SIZE\s*:=\s*.*|BOARD_RECOVERYIMAGE_PARTITION_SIZE := 268435456|' "$DT_DIR/BoardConfig.mk"
+            else
+              echo "BOARD_RECOVERYIMAGE_PARTITION_SIZE := 268435456" >> "$DT_DIR/BoardConfig.mk"
+            fi
+            echo "=== BoardConfig.mk AFTER partition size bump ==="
+            grep -E "BOARD_RECOVERYIMAGE_PARTITION_SIZE" "$DT_DIR/BoardConfig.mk"
+          fi
           echo "=== AndroidProducts.mk after patch ==="
           cat "$DT_DIR/AndroidProducts.mk"
           echo "=== twrp_*.mk after patch ==="
