@@ -393,3 +393,8 @@ ro.build.display.id=PDPM00_11_C.29
 ro.build.display.ota=PDPM00_11_C.29
 ro.oplus.pipeline_key=ALLNET
 ro.build.oplus_ext_partitions=my_product my_engineering my_stock my_heytap my_region my_carrier my_preload my_company
+
+# Added for TWRP device tree generation (twrpdtgen requires these)
+ro.product.board=sdm660
+ro.product.name=PMPD00
+ro.product.model=PMPD00
