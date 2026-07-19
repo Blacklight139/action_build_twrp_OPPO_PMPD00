@@ -97,7 +97,7 @@ jobs:
           test -f build/envsetup.sh
           echo "=== Disk after sync ==="
           df -h /
-          du -sh twrp-src
+          du -sh "$GITHUB_WORKSPACE/twrp-src"
 
       - name: Prune .repo to free space
         run: |
