@@ -141,28 +141,31 @@ jobs:
           # and uses omni_<dev>.mk naming. Patch the generated tree so it works with
           # the minimal manifest:
           #   1. Replace vendor/omni references with vendor/twrp in all .mk files
-          #   2. Rename omni_<dev>.mk -> twrp_<dev>.mk
-          #   3. Update AndroidProducts.mk and vendorsetup.sh to use twrp_ prefix
+          #   2. Replace omni_<dev> with twrp_<dev> in all .mk files (PRODUCT_NAME etc.)
+          #   3. Rename omni_<dev>.mk -> twrp_<dev>.mk
+          #   4. Update vendorsetup.sh to use twrp_ prefix
           DT_DIR="device_tree_output/${{ env.DEV_REL }}"
           echo "Patching device tree in: $DT_DIR"
           # 1. Replace vendor/omni -> vendor/twrp in all .mk files
           find "$DT_DIR" -type f -name '*.mk' -print0 | xargs -0 sed -i 's|vendor/omni|vendor/twrp|g'
-          # 2. Rename omni_<dev>.mk -> twrp_<dev>.mk
+          # 2. Replace omni_ -> twrp_ in all .mk files (covers PRODUCT_NAME, AndroidProducts.mk, etc.)
+          find "$DT_DIR" -type f -name '*.mk' -print0 | xargs -0 sed -i 's|omni_|twrp_|g'
+          # 3. Rename omni_<dev>.mk -> twrp_<dev>.mk
           for f in "$DT_DIR"/omni_*.mk; do
             [ -e "$f" ] || continue
             new_f="$(echo "$f" | sed 's|/omni_|/twrp_|')"
             mv "$f" "$new_f"
             echo "Renamed: $(basename "$f") -> $(basename "$new_f")"
           done
-          # 3. Update AndroidProducts.mk to reference twrp_*.mk
-          if [ -f "$DT_DIR/AndroidProducts.mk" ]; then
-            sed -i 's|omni_|twrp_|g' "$DT_DIR/AndroidProducts.mk"
-            echo "=== AndroidProducts.mk after patch ==="
-            cat "$DT_DIR/AndroidProducts.mk"
-          fi
           # 4. Update vendorsetup.sh if present
           if [ -f "$DT_DIR/vendorsetup.sh" ]; then
             sed -i 's|omni_|twrp_|g' "$DT_DIR/vendorsetup.sh"
+          fi
+          echo "=== AndroidProducts.mk after patch ==="
+          cat "$DT_DIR/AndroidProducts.mk"
+          echo "=== twrp_*.mk after patch ==="
+          cat "$DT_DIR"/twrp_*.mk
+          if [ -f "$DT_DIR/vendorsetup.sh" ]; then
             echo "=== vendorsetup.sh after patch ==="
             cat "$DT_DIR/vendorsetup.sh"
           fi
