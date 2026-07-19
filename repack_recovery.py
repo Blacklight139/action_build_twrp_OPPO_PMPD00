@@ -267,12 +267,19 @@ def process_image(img_path, target_prop):
         old_data = prop_entry['data']
         old_sha = hashlib.sha256(old_data).hexdigest()
         old_size = len(old_data)
+        old_mode = prop_entry['mode']
         print('prop.default found in ramdisk.')
-        print('  Before: %d bytes, sha256=%s' % (old_size, old_sha))
+        print('  Before: %d bytes, sha256=%s, mode=0o%o' % (old_size, old_sha, old_mode))
         print('  After:  %d bytes, sha256=%s' % (target_size, target_sha))
         prop_entry['data'] = target_prop
         prop_entry['filesize'] = target_size
+        # Force regular file mode (S_IFREG | 0644). Original ramdisk had
+        # prop.default as a symlink (S_IFLNK | 0644), which breaks AIK-based
+        # tools (twrpdtgen, unpackbootimg) that cannot handle symlink entries.
+        prop_entry['mode'] = 0o100644
         # namesize and all other metadata preserved
+        if old_mode != 0o100644:
+            print('  mode fixed: 0o%o -> 0o100644 (regular file)' % old_mode)
     else:
         print('prop.default NOT found in ramdisk; inserting new entry.')
         print('  Before: (none - new entry)')
