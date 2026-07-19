@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       IMG_URL:
-        description: 'URL to recovery.img (raw link)'
+        description: 'URL to recovery.img (raw link). Leave default to use repo image.'
         required: true
-        default: 'https://github.com/${{ github.repository }}/raw/main/recovery.img'
+        default: ''
       TWRP_BRANCH:
         description: 'TWRP manifest branch'
         required: true
@@ -152,8 +152,11 @@ jobs:
         run: |
           if [ -f recovery.img ]; then
             echo "Using recovery.img from repository"
-          else
+          elif [ -n "${{ inputs.IMG_URL }}" ]; then
             wget -O recovery.img "${{ inputs.IMG_URL }}"
+          else
+            echo "ERROR: recovery.img not in repo and IMG_URL is empty" >&2
+            exit 1
           fi
           file recovery.img
 
