@@ -8,9 +8,14 @@ on:
         required: true
         default: 'Twrp_Device_Generator'
       IMG_URL:
-        description: 'URL to recovery/boot image'
-        required: true
-        default: 'https://github.com/momo54181/action_build_twrp_device_tree/raw/main/recovery.img'
+        description: 'URL to recovery/boot image (optional; defaults to in-repo recovery.img)'
+        required: false
+        default: ''
+      BUILD_TWRP:
+        description: 'Whether to actually compile TWRP recovery.img (takes hours, may timeout)'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   generate-device-tree:
@@ -36,9 +41,13 @@ jobs:
       run: |
         pip3 install --upgrade twrpdtgen
         
-    - name: Download recovery image
+    - name: Prepare recovery image
       run: |
-        wget -O recovery.img "${{ github.event.inputs.IMG_URL }}"
+        if [ -n "${{ github.event.inputs.IMG_URL }}" ]; then
+          wget -O recovery.img "${{ github.event.inputs.IMG_URL }}"
+        else
+          echo "IMG_URL is empty, using in-repo recovery.img"
+        fi
         file recovery.img || true  # Display file info for debugging
       
     - name: Generate device tree
@@ -63,6 +72,94 @@ jobs:
         body: |
           Automatically generated TWRP device tree
           Build run: ${{ github.run_number }}
-          Source image: ${{ github.event.inputs.IMG_URL }}
+          Source image: ${{ github.event.inputs.IMG_URL || 'in-repo recovery.img' }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-twrp:
+    needs: generate-device-tree
+    if: github.event.repository.owner.id == github.event.sender.id && github.event.inputs.BUILD_TWRP == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          git-core gnupg flex bison build-essential zip curl zlib1g-dev \
+          gcc-multilib g++-multilib libc6-dev-i386 libncurses5-dev \
+          lib32ncurses5-dev x11proto-core-dev libx11-dev lib32z1-dev \
+          libgl1-mesa-dev libxml2-utils xsltproc unzip cpio python3 \
+          openjdk-8-jdk repo
+    
+    - name: Download device tree from release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        gh release download dt-${{ github.run_number }} \
+          --pattern "DeviceTree_${{ github.run_number }}.zip" \
+          --output device_tree.zip
+        mkdir -p device_tree_output
+        unzip -o device_tree.zip -d device_tree_output
+        echo "Device tree contents:"
+        find device_tree_output -maxdepth 4 -type f | head -50
+    
+    - name: Clone TWRP source tree
+      run: |
+        mkdir -p twrp
+        cd twrp
+        repo init -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_omni.git -b twrp-11 --depth=1
+        repo sync -c -j$(nproc) --no-tags --no-clone-bundle --current-branch
+    
+    - name: Inject device tree
+      run: |
+        # device_tree_output 的结构通常是 <vendor>/<model>/... 直接放到 device/ 下
+        # 找到顶层 vendor 目录
+        VENDOR=$(ls device_tree_output | head -1)
+        echo "Detected vendor: $VENDOR"
+        mkdir -p twrp/device
+        cp -r device_tree_output/* twrp/device/
+        echo "Injected device tree:"
+        find twrp/device -maxdepth 4 -type f | head -50
+    
+    - name: Build TWRP recovery image
+      run: |
+        cd twrp
+        source build/envsetup.sh
+        # 自动找到 lunch target：device/<vendor>/<model> 下的 .mk 推断 omni_<model>-eng
+        TARGET=$(find device -name "AndroidProducts.mk" -exec dirname {} \; | head -1)
+        DEVICE=$(basename $TARGET)
+        echo "Lunching omni_${DEVICE}-eng"
+        lunch omni_${DEVICE}-eng
+        mka recoveryimage
+        # 找到产物
+        find out/target/product -name "recovery.img" -type f
+    
+    - name: Rename and upload TWRP image
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        cd twrp
+        IMG=$(find out/target/product -name "recovery.img" -type f | head -1)
+        if [ -z "$IMG" ]; then
+          echo "ERROR: recovery.img not found in out/"
+          exit 1
+        fi
+        DEVICE=$(basename $(find device -name "AndroidProducts.mk" -exec dirname {} \; | head -1))
+        cp "$IMG" "../TWRP_${DEVICE}_${{ github.run_number }}.img"
+        cd ..
+        file "TWRP_${DEVICE}_${{ github.run_number }}.img"
+        gh release upload dt-${{ github.run_number }} "TWRP_${DEVICE}_${{ github.run_number }}.img" --clobber
+    
+    - name: Diagnostics (always run)
+      if: always()
+      run: |
+        echo "=== Build job status: ${{ job.status }} ==="
+        echo "=== Recovery.img in out/: ==="
+        find twrp/out/target/product -name "recovery.img" -type f 2>/dev/null || echo "none"
+        echo "=== Disk usage: ==="
+        df -h | tail -5
