@@ -18,12 +18,24 @@ env:
   DEBIAN_FRONTEND: noninteractive
 
 jobs:
-  sync-source:
+  build-twrp:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 360
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          echo "=== Before cleanup ==="
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /usr/local/share/powershell /usr/share/swift /usr/lib/jvm/java-8-openjdk-amd64 /usr/lib/jvm/java-13-openjdk-amd64 /usr/lib/jvm/java-15-openjdk-amd64 /usr/lib/jvm/java-17-openjdk-amd64 /usr/lib/jvm/java-21-openjdk-amd64 2>/dev/null || true
+          sudo apt-get purge -y 'ghc-*' 'cabal-*' 'dotnet-*' 'llvm-*' 'powershell*' 'mono-*' 'ruby*' 2>/dev/null || true
+          sudo apt-get autoremove -y --purge 2>/dev/null || true
+          sudo apt-get clean
+          docker images -q 2>/dev/null | xargs -r sudo docker rmi -f 2>/dev/null || true
+          echo "=== After cleanup ==="
+          df -h /
 
       - name: Install build dependencies
         run: |
@@ -39,6 +51,16 @@ jobs:
           sudo chmod +x /usr/local/bin/repo
           repo --version 2>&1 | head -3
 
+      - name: Increase swap
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+          df -h /
+
       - name: Configure git
         run: |
           git config --global user.name "github-actions[bot]"
@@ -48,6 +70,7 @@ jobs:
       - name: Show mirror strategy
         run: |
           echo "GitHub-hosted runner is outside mainland China; using source googlesource directly (no url.insteadOf rewrite)."
+          df -h /
 
       - name: Init TWRP source
         run: |
@@ -72,76 +95,16 @@ jobs:
             fi
           done
           test -f build/envsetup.sh
+          echo "=== Disk after sync ==="
+          df -h /
+          du -sh twrp-src
 
-      - name: Pack source into chunks
+      - name: Prune .repo to free space
         run: |
-          cd "$GITHUB_WORKSPACE"
-          tar -cf - twrp-src/ | split -b 1800m - twrp-src-part-
-          ls -lh twrp-src-part-*
-
-      - name: Upload source chunks
-        uses: actions/upload-artifact@v4
-        with:
-          name: twrp-src-chunks
-          path: twrp-src-part-*
-          retention-days: 1
-          compression-level: 0
-
-      - name: Cleanup workspace
-        run: |
-          rm -rf twrp-src twrp-src-part-*
-          df -h
-
-  build-recovery:
-    runs-on: ubuntu-latest
-    timeout-minutes: 200
-    needs: sync-source
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y \
-            openjdk-11-jdk git git-lfs \
-            python3 python3-pip \
-            libncurses-dev libssl-dev libreadline-dev \
-            flex bison g++-multilib \
-            zip unzip cpio wget curl lz4 xxd \
-            build-essential bc rsync
-          sudo curl -sSL https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
-          sudo chmod +x /usr/local/bin/repo
-
-      - name: Increase swap
-        run: |
-          sudo swapoff -a || true
-          sudo fallocate -l 16G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          free -h
-
-      - name: Configure git
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git config --global color.ui false
-
-      - name: Download source chunks
-        uses: actions/download-artifact@v4
-        with:
-          name: twrp-src-chunks
-          path: chunks/
-
-      - name: Reassemble source
-        run: |
-          cat chunks/twrp-src-part-* > twrp-src.tar
-          tar -xf twrp-src.tar
-          test -f twrp-src/build/envsetup.sh
-          rm -f twrp-src.tar
-          rm -rf chunks
-          df -h
+          cd twrp-src
+          du -sh .repo 2>/dev/null || true
+          rm -rf .repo
+          df -h /
 
       - name: Install twrpdtgen
         run: |
@@ -174,6 +137,7 @@ jobs:
           mkdir -p twrp-src/device/$(dirname ${{ env.DEV_REL }})
           cp -r device_tree_output/${{ env.DEV_REL }} twrp-src/device/${{ env.DEV_REL }}
           ls -la twrp-src/device/${{ env.DEV_REL }}
+          rm -rf device_tree_output
 
       - name: Determine lunch target
         run: |
@@ -193,6 +157,7 @@ jobs:
           source build/envsetup.sh
           lunch ${{ env.LUNCH_TARGET }}
           m recoveryimage -j4
+          df -h /
 
       - name: Collect recovery image
         run: |
@@ -211,26 +176,6 @@ jobs:
           path: artifacts/recovery.img
           retention-days: 7
 
-  release:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    needs: build-recovery
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Download recovery image artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: twrp-recovery-${{ github.run_number }}
-          path: artifacts/
-
-      - name: Recompute sha256
-        run: |
-          cd artifacts
-          sha256sum recovery.img > recovery.img.sha256
-          ls -la
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -244,6 +189,6 @@ jobs:
 
             Build run: ${{ github.run_number }}
             Source image: ${{ inputs.IMG_URL }}
-            Runner: ubuntu-latest (GitHub-hosted, multi-job split)
+            Runner: ubuntu-latest (GitHub-hosted, single job)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
