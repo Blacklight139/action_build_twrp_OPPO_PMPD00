@@ -1,0 +1,246 @@
+name: Build TWRP Recovery Image (GitHub-hosted)
+
+on:
+  workflow_dispatch:
+    inputs:
+      IMG_URL:
+        description: 'URL to recovery.img (raw link)'
+        required: true
+        default: 'https://github.com/${{ github.repository }}/raw/main/recovery.img'
+      TWRP_BRANCH:
+        description: 'TWRP manifest branch'
+        required: true
+        default: 'twrp-12.1'
+
+env:
+  JAVA_HOME: /usr/lib/jvm/java-11-openjdk-amd64
+  GIT_LFS_SKIP_SMUDGE: "1"
+  DEBIAN_FRONTEND: noninteractive
+
+jobs:
+  sync-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            openjdk-11-jdk git git-lfs \
+            python3 python3-pip \
+            libncurses-dev libssl-dev libreadline-dev \
+            flex bison g++-multilib \
+            zip unzip cpio wget curl lz4 xxd \
+            build-essential bc rsync
+          sudo curl -sSL https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
+          sudo chmod +x /usr/local/bin/repo
+          repo --version 2>&1 | head -3
+
+      - name: Configure git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global color.ui false
+
+      - name: Show mirror strategy
+        run: |
+          echo "GitHub-hosted runner is outside mainland China; using source googlesource directly (no url.insteadOf rewrite)."
+
+      - name: Init TWRP source
+        run: |
+          mkdir -p twrp-src
+          cd twrp-src
+          repo init -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git -b ${{ inputs.TWRP_BRANCH }} --depth=1 --no-tags
+
+      - name: Sync TWRP source
+        run: |
+          cd twrp-src
+          for i in 1 2 3; do
+            echo "=== repo sync attempt $i ==="
+            if repo sync -c -j8 --no-clone-bundle --no-tags; then
+              echo "repo sync SUCCESS"
+              break
+            fi
+            echo "attempt $i failed, retrying in 30s..."
+            sleep 30
+            if [ $i -eq 3 ]; then
+              echo "repo sync FAILED after 3 attempts"
+              exit 1
+            fi
+          done
+          test -f build/envsetup.sh
+
+      - name: Pack source into chunks
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          tar -cf - twrp-src/ | split -b 1800m - twrp-src-part-
+          ls -lh twrp-src-part-*
+
+      - name: Upload source chunks
+        uses: actions/upload-artifact@v4
+        with:
+          name: twrp-src-chunks
+          path: twrp-src-part-*
+          retention-days: 1
+          compression-level: 0
+
+      - name: Cleanup workspace
+        run: |
+          rm -rf twrp-src twrp-src-part-*
+          df -h
+
+  build-recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 200
+    needs: sync-source
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            openjdk-11-jdk git git-lfs \
+            python3 python3-pip \
+            libncurses-dev libssl-dev libreadline-dev \
+            flex bison g++-multilib \
+            zip unzip cpio wget curl lz4 xxd \
+            build-essential bc rsync
+          sudo curl -sSL https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
+          sudo chmod +x /usr/local/bin/repo
+
+      - name: Increase swap
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
+      - name: Configure git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global color.ui false
+
+      - name: Download source chunks
+        uses: actions/download-artifact@v4
+        with:
+          name: twrp-src-chunks
+          path: chunks/
+
+      - name: Reassemble source
+        run: |
+          cat chunks/twrp-src-part-* > twrp-src.tar
+          tar -xf twrp-src.tar
+          test -f twrp-src/build/envsetup.sh
+          rm -f twrp-src.tar
+          rm -rf chunks
+          df -h
+
+      - name: Install twrpdtgen
+        run: |
+          pip3 install --upgrade twrpdtgen
+          python3 -m twrpdtgen --help 2>&1 | head -3
+
+      - name: Prepare recovery image
+        run: |
+          if [ -f recovery.img ]; then
+            echo "Using recovery.img from repository"
+          else
+            wget -O recovery.img "${{ inputs.IMG_URL }}"
+          fi
+          file recovery.img
+
+      - name: Generate device tree
+        run: |
+          mkdir -p device_tree_output
+          python3 -m twrpdtgen -o device_tree_output recovery.img
+          DEV_TREE=$(find device_tree_output -name AndroidProducts.mk -printf '%h\n' | head -1)
+          REL=$(echo "$DEV_TREE" | sed 's|device_tree_output/||')
+          echo "DEV_REL=$REL" >> $GITHUB_ENV
+          echo "Generated device tree: $REL"
+
+      - name: Install device tree into source
+        run: |
+          mkdir -p twrp-src/device/$(dirname ${{ env.DEV_REL }})
+          cp -r device_tree_output/${{ env.DEV_REL }} twrp-src/device/${{ env.DEV_REL }}
+          ls -la twrp-src/device/${{ env.DEV_REL }}
+
+      - name: Determine lunch target
+        run: |
+          cd twrp-src/device/${{ env.DEV_REL }}
+          LUNCH_DEVICE=$(grep -oP 'twrp_\K[a-zA-Z0-9_\-]+(?=\.mk)' AndroidProducts.mk | head -1)
+          if [ -z "$LUNCH_DEVICE" ]; then
+            LUNCH_DEVICE=$(grep -oP 'omni_\K[a-zA-Z0-9_\-]+(?=\.mk)' AndroidProducts.mk | head -1)
+            echo "LUNCH_TARGET=omni_${LUNCH_DEVICE}-userdebug" >> $GITHUB_ENV
+          else
+            echo "LUNCH_TARGET=twrp_${LUNCH_DEVICE}-userdebug" >> $GITHUB_ENV
+          fi
+          echo "Lunch target: ${{ env.LUNCH_TARGET }}"
+
+      - name: Build TWRP recovery image
+        run: |
+          cd twrp-src
+          source build/envsetup.sh
+          lunch ${{ env.LUNCH_TARGET }}
+          m recoveryimage -j4
+
+      - name: Collect recovery image
+        run: |
+          mkdir -p artifacts
+          IMG_PATH=$(find twrp-src/out/target/product -name recovery.img | head -1)
+          echo "Found recovery.img at: $IMG_PATH"
+          cp "$IMG_PATH" artifacts/recovery.img
+          sha256sum artifacts/recovery.img > artifacts/recovery.img.sha256
+          file artifacts/recovery.img
+          ls -lh artifacts/
+
+      - name: Upload recovery image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: twrp-recovery-${{ github.run_number }}
+          path: artifacts/recovery.img
+          retention-days: 7
+
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: build-recovery
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download recovery image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: twrp-recovery-${{ github.run_number }}
+          path: artifacts/
+
+      - name: Recompute sha256
+        run: |
+          cd artifacts
+          sha256sum recovery.img > recovery.img.sha256
+          ls -la
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/recovery.img
+            artifacts/recovery.img.sha256
+          name: TWRP_Recovery_GH_${{ github.run_number }}
+          tag_name: twrp-gh-${{ github.run_number }}
+          body: |
+            TWRP ${{ inputs.TWRP_BRANCH }} recovery image built on GitHub-hosted runner
+
+            Build run: ${{ github.run_number }}
+            Source image: ${{ inputs.IMG_URL }}
+            Runner: ubuntu-latest (GitHub-hosted, multi-job split)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

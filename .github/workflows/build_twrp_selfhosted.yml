@@ -1,0 +1,161 @@
+name: Build TWRP Recovery Image (Self-hosted)
+
+on:
+  workflow_dispatch:
+    inputs:
+      IMG_URL:
+        description: 'URL to recovery.img (raw link)'
+        required: true
+        default: 'https://github.com/${{ github.repository }}/raw/main/recovery.img'
+      TWRP_BRANCH:
+        description: 'TWRP manifest branch'
+        required: true
+        default: 'twrp-12.1'
+      AOSP_MIRROR:
+        description: 'AOSP mirror: ustc | tuna | none'
+        required: true
+        default: 'ustc'
+
+env:
+  JAVA_HOME: /usr/lib/jvm/java-11-openjdk-amd64
+  GIT_LFS_SKIP_SMUDGE: "1"
+  DEBIAN_FRONTEND: noninteractive
+  AOSP_MIRROR: ${{ inputs.AOSP_MIRROR }}
+
+jobs:
+  build-twrp-selfhosted:
+    runs-on: [self-hosted, twrp]
+    timeout-minutes: 720
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          set -e
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            openjdk-11-jdk git git-lfs \
+            python3 python3-pip \
+            libncurses-dev libssl-dev libreadline-dev \
+            flex bison g++-multilib \
+            zip unzip cpio wget curl lz4 xxd \
+            build-essential bc rsync
+          if ! command -v repo >/dev/null 2>&1; then
+            sudo curl -sSL https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
+            sudo chmod +x /usr/local/bin/repo
+          fi
+          repo --version 2>&1 | head -3
+
+      - name: Configure git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global color.ui false
+
+      - name: Setup AOSP mirror
+        run: |
+          bash scripts/setup_aosp_mirrors.sh
+          # Expose REPO_URL to subsequent steps
+          echo "REPO_URL=https://github.com/GerritCodeReview/git-repo" >> $GITHUB_ENV
+
+      - name: Init TWRP source
+        run: |
+          mkdir -p twrp-src
+          cd twrp-src
+          repo init -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git -b ${{ inputs.TWRP_BRANCH }} --depth=1 --no-tags
+
+      - name: Sync TWRP source
+        run: |
+          cd twrp-src
+          for i in 1 2 3; do
+            echo "=== repo sync attempt $i ==="
+            if repo sync -c -j8 --no-clone-bundle --no-tags; then
+              echo "repo sync SUCCESS"
+              break
+            fi
+            echo "attempt $i failed, retrying in 30s..."
+            sleep 30
+            if [ $i -eq 3 ]; then
+              echo "repo sync FAILED after 3 attempts"
+              exit 1
+            fi
+          done
+          test -f build/envsetup.sh
+
+      - name: Install twrpdtgen
+        run: |
+          pip3 install --upgrade twrpdtgen || pip3 install --user --upgrade twrpdtgen
+          python3 -m twrpdtgen --help 2>&1 | head -3
+
+      - name: Prepare recovery image
+        run: |
+          if [ -f recovery.img ]; then
+            echo "Using recovery.img from repository"
+          else
+            wget -O recovery.img "${{ inputs.IMG_URL }}"
+          fi
+          file recovery.img
+
+      - name: Generate device tree
+        run: |
+          mkdir -p device_tree_output
+          python3 -m twrpdtgen -o device_tree_output recovery.img
+          DEV_TREE=$(find device_tree_output -name AndroidProducts.mk -printf '%h\n' | head -1)
+          REL=$(echo "$DEV_TREE" | sed 's|device_tree_output/||')
+          echo "DEV_REL=$REL" >> $GITHUB_ENV
+          echo "Generated device tree: $REL"
+
+      - name: Install device tree into source
+        run: |
+          mkdir -p twrp-src/device/$(dirname ${{ env.DEV_REL }})
+          cp -r device_tree_output/${{ env.DEV_REL }} twrp-src/device/${{ env.DEV_REL }}
+          ls -la twrp-src/device/${{ env.DEV_REL }}
+
+      - name: Determine lunch target
+        run: |
+          cd twrp-src/device/${{ env.DEV_REL }}
+          LUNCH_DEVICE=$(grep -oP 'twrp_\K[a-zA-Z0-9_\-]+(?=\.mk)' AndroidProducts.mk | head -1)
+          if [ -z "$LUNCH_DEVICE" ]; then
+            LUNCH_DEVICE=$(grep -oP 'omni_\K[a-zA-Z0-9_\-]+(?=\.mk)' AndroidProducts.mk | head -1)
+            echo "LUNCH_TARGET=omni_${LUNCH_DEVICE}-userdebug" >> $GITHUB_ENV
+          else
+            echo "LUNCH_TARGET=twrp_${LUNCH_DEVICE}-userdebug" >> $GITHUB_ENV
+          fi
+          echo "Lunch target: ${{ env.LUNCH_TARGET }}"
+
+      - name: Build TWRP recovery image
+        timeout-minutes: 600
+        run: |
+          cd twrp-src
+          source build/envsetup.sh
+          lunch ${{ env.LUNCH_TARGET }}
+          m recoveryimage -j$(nproc)
+
+      - name: Collect recovery image
+        run: |
+          mkdir -p artifacts
+          IMG_PATH=$(find twrp-src/out/target/product -name recovery.img | head -1)
+          echo "Found recovery.img at: $IMG_PATH"
+          cp "$IMG_PATH" artifacts/recovery.img
+          sha256sum artifacts/recovery.img > artifacts/recovery.img.sha256
+          file artifacts/recovery.img
+          ls -lh artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/recovery.img
+            artifacts/recovery.img.sha256
+          name: TWRP_Recovery_SH_${{ github.run_number }}
+          tag_name: twrp-sh-${{ github.run_number }}
+          body: |
+            TWRP ${{ inputs.TWRP_BRANCH }} recovery image built on self-hosted runner
+
+            Build run: ${{ github.run_number }}
+            Source image: ${{ inputs.IMG_URL }}
+            AOSP mirror: ${{ inputs.AOSP_MIRROR }}
+            Runner: self-hosted, twrp
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
