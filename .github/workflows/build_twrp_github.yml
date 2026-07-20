@@ -17,6 +17,9 @@ env:
   GIT_LFS_SKIP_SMUDGE: "1"
   DEBIAN_FRONTEND: noninteractive
 
+permissions:
+  contents: write
+
 jobs:
   build-twrp:
     runs-on: ubuntu-latest
